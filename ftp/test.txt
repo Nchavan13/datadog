@@ -1,0 +1,176 @@
+import Utility.*;
+import org.apache.log4j.Logger;
+import org.apache.sshd.client.SshClient;
+import org.apache.sshd.client.session.ClientSession;
+import org.apache.sshd.sftp.client.SftpClient;
+import org.apache.sshd.sftp.client.SftpClientFactory;
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.GeneralSecurityException;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+public class FTP {
+    private static final Logger logger = Logger.getLogger(FTP.class);
+    private SftpClient sftpClient;
+    public static DBManager db;
+    
+    private String FTPHOST;
+    private int FTPPORT;
+    private String FTPINDIR;
+    private String FTPOUTDIR;
+    private String FTPPRIVATEKEY;
+    private ArrayList<String> acceptedExtension = new ArrayList<>();
+
+    public FTP(DBManager pDb) {
+        db = pDb;
+        this.FTPHOST = Config.getProperty("FTPHOST");
+        this.FTPPORT = Integer.parseInt(Config.getProperty("FTPPORT"));
+        this.FTPINDIR = Config.getProperty("FTPINDIR");
+        this.FTPOUTDIR = Config.getProperty("FTPOUTDIR");
+        this.FTPPRIVATEKEY = Config.getProperty("FTPPRIVATEKEY");
+        this.addAcceptedExtension();
+    }
+
+    private void addAcceptedExtension() {
+        acceptedExtension.add(".crd");
+        acceptedExtension.add(".dat");
+        acceptedExtension.add(".txt");
+    }
+
+    public boolean connect(String host, int portNumber, String user, String privateKeyLocation) {
+        try {
+            logger.info("Connecting to " + host + " on port " + portNumber);
+            SshClient client = SshClient.setUpDefaultClient();
+            client.start();
+            ClientSession session = client.connect(user, host, portNumber).verify(60, TimeUnit.SECONDS).getSession();
+            session.addPublicKeyIdentity(Paths.get(privateKeyLocation));
+            session.auth().verify(60, TimeUnit.SECONDS);
+
+            this.sftpClient = SftpClientFactory.instance().createSftpClient(session);
+            logger.info("Successfully connected.");
+            return true;
+        } catch (GeneralSecurityException | IOException e) {
+            logger.error("Error connecting to SFTP server: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    public void disconnect() {
+        try {
+            if (this.sftpClient != null) {
+                this.sftpClient.close();
+            }
+        } catch (IOException e) {
+            logger.error("Error disconnecting from SFTP server: " + e.getMessage(), e);
+        }
+    }
+
+    public boolean uploadFile(String source, String destination) {
+        Path src = Paths.get(source);
+        Path dest = Paths.get(destination);
+        try {
+            logger.info("Uploading file: " + source + " to " + destination);
+            this.sftpClient.put(source, destination);
+            logger.info("File uploaded successfully.");
+            return true;
+        } catch (IOException e) {
+            logger.error("Error uploading file: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    public boolean downloadFile(String source, String destination) {
+        try {
+            logger.info("Downloading file from " + source + " to " + destination);
+            this.sftpClient.get(source, destination);
+            logger.info("File downloaded successfully.");
+            return true;
+        } catch (IOException e) {
+            logger.error("Error downloading file: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    public boolean deleteFile(String fileLocation) {
+        try {
+            logger.info("Deleting file: " + fileLocation);
+            sftpClient.remove(fileLocation);
+            return true;
+        } catch (Exception e) {
+            logger.error("Error deleting file: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    public void uploadToAcceptor() {
+        logger.info("Downloading files from FTP");
+        ArrayList<FtpUserList> userList = db.CompressorEtlherList();
+        for (FtpUserList user : userList) {
+            if (this.connect(this.FTPHOST, this.FTPPORT, user.getLogin(), this.FTPPRIVATEKEY)) {
+                List<RemoteResourceInfo> list = this.sftpClient.readDir(FTPOUTDIR);
+                if (list != null) {
+                    for (RemoteResourceInfo entry : list) {
+                        String filename = entry.getName();
+                        if (acceptedExtension.contains(filename.substring(filename.lastIndexOf(".")))) {
+                            try {
+                                Fileclass sftpFile = db.ftpInsertFile(new BigDecimal(user.getUserid()), filename, new BigDecimal(entry.getAttributes().getSize()));
+                                String destination = sftpFile.getFilepath() + "/" + sftpFile.getSystemfilename() + ".txt";
+                                if (this.downloadFile(filename, destination)) {
+                                    this.deleteFile(filename);
+                                    db.sftpStatusUpdate(sftpFile.getId());
+                                }
+                            } catch (Exception e) {
+                                logger.error("Error processing file: " + e.getMessage(), e);
+                            }
+                        }
+                    }
+                }
+                this.disconnect();
+            }
+        }
+    }
+
+    public static void main(String[] args) throws SQLException, InterruptedException {
+        Config.initial(args[1], "FTP");
+        db = new DBManager("FTP");
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                db.releaseEIP();
+                db.close();
+                logger.info("Bye");
+            } catch (Exception ex) {
+                logger.error("Error during clean up: " + ex.getMessage(), ex);
+            }
+        }));
+
+        while (true) {
+            try {
+                if (db.isAnotherFTPInstanceRunning()) {
+                    logger.fatal("Another instance of FTP is running, exiting.");
+                    db.close();
+                    System.exit(1);
+                } else {
+                    db.lockFTP();
+                }
+                break;
+            } catch (SQLException e) {
+                Thread.sleep(1000);
+            }
+        }
+
+        while (true) {
+            try {
+                FTP ftp = new FTP(db);
+                ftp.uploadToAcceptor();
+            } catch (Exception e) {
+                logger.error("Error in main FTP loop: " + e.getMessage(), e);
+                Thread.sleep(10000);
+            }
+        }
+    }
+}
