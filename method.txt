@@ -1,0 +1,19 @@
+public boolean connect(String host, int portNumber, String user, String privateKeyLocation) {
+    try {
+        logger.info("Connecting to {} {} as user {} with key {}", host, portNumber, user, privateKeyLocation);
+        SshClient client = SshClient.setUpDefaultClient();
+        client.start();
+        ClientSession session = client.connect(user, host, portNumber).verify().getSession();
+
+        // IMPORTANT! Replace with proper key loading and known hosts check in production
+        session.addPublicKeyIdentity(SshClient.setUpDefaultClient().loadClientIdentity(Paths.get(privateKeyLocation), null));
+        session.auth().verify();
+
+        this.sftpClient = SftpClientFactory.instance().createSftpClient(session);
+        logger.info("Successfully connected.");
+        return this.sftpClient != null;
+    } catch (GeneralSecurityException | IOException e) {
+        logger.error("Error connecting to SFTP server: {}", e.getMessage(), e);
+        return false;
+    }
+}
