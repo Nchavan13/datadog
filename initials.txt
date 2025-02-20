@@ -1,0 +1,130 @@
+import javapasswordsdk.PSDKException;
+import javapasswordsdk.PSDKPassword;
+import javapasswordsdk.PSDKPasswordRequest;
+import org.apache.log4j.Logger;
+import java.util.Arrays;
+
+public class MysqlInitial {
+    // Database properties
+    private String db_host;
+    private String db_port;
+    private String db_database;
+
+    // Acceptor
+    private String db_acceptor_username;
+    private String db_acceptor_password;
+
+    // Processor
+    private String db_processor_username;
+    private String db_processor_password;
+
+    // Compressor
+    private String db_compressor_username;
+    private String db_compressor_password;
+
+    // FTP
+    private String db_ftp_username;
+    private String db_ftp_password;
+    
+    private String db_maxretry;
+
+    private static final Logger logger = Logger.getLogger(MysqlInitial.class);
+
+    public MysqlInitial() {
+        this.db_host = Config.getProperty("MYSQL_DB_HOST");
+        this.db_port = Config.getProperty("MYSQL_DB_PORT");
+        this.db_database = Config.getProperty("MYSQL_DB_DATABASE");
+        String hashkey = Config.getProperty("HASHKEY");
+
+        PSDKPassword creds = null;
+
+        try {
+            String ObjectAcceptor = Config.getProperty("Cyberark_ObjectAcceptor");
+            creds = getCyberarkCredentials(ObjectAcceptor);
+
+            this.db_acceptor_username = creds.getUserName();
+            this.db_acceptor_password = getPasswordFromCreds(creds);
+
+        } catch (Exception e) {
+            logger.error("Error fetching acceptor credentials: " + e.getMessage(), e);
+        }
+
+        try {
+            String ObjectProcessor = Config.getProperty("Cyberark_ObjectProcessor");
+            creds = getCyberarkCredentials(ObjectProcessor);
+
+            this.db_processor_username = creds.getUserName();
+            this.db_processor_password = getPasswordFromCreds(creds);
+
+        } catch (Exception e) {
+            logger.error("Error fetching processor credentials: " + e.getMessage(), e);
+        }
+
+        try {
+            String ObjectCompressor = Config.getProperty("Cyberark_ObjectCompressor");
+            creds = getCyberarkCredentials(ObjectCompressor);
+
+            this.db_compressor_username = creds.getUserName();
+            this.db_compressor_password = getPasswordFromCreds(creds);
+
+        } catch (Exception e) {
+            logger.error("Error fetching compressor credentials: " + e.getMessage(), e);
+        }
+
+        try {
+            String ObjectFTP = Config.getProperty("Cyberark_ObjectFTP");
+            creds = getCyberarkCredentials(ObjectFTP);
+
+            this.db_ftp_username = creds.getUserName();
+            this.db_ftp_password = getPasswordFromCreds(creds);
+
+            this.db_maxretry = Config.getProperty("MAXRETRYDB");
+
+        } catch (Exception e) {
+            logger.error("Error fetching FTP credentials: " + e.getMessage(), e);
+        }
+    }
+
+    public PSDKPassword getCyberarkCredentials(String object) throws PSDKException {
+        PSDKPassword creds = null;
+
+        try {
+            String appID = Config.getProperty("Cyberark_AppID");
+            String safe = Config.getProperty("Cyberark_Safe");
+            String folder = Config.getProperty("Cyberark_Folder");
+
+            PSDKPasswordRequest passRequest = new PSDKPasswordRequest();
+            passRequest.setAppID(appID);
+            passRequest.setSafe(safe);
+            passRequest.setFolder(folder);
+            passRequest.setObject(object);
+            passRequest.setReason("DES Java + object + password request");
+
+            // Fetch password from CyberArk
+            creds = javapasswordsdk.PasswordSDK.getPassword(passRequest);
+
+            logger.info("APRID: " + appID);
+            logger.info("Safe: " + safe);
+            logger.info("Folder: " + folder);
+            logger.info("Object: " + object);
+            logger.info("Creds Username: " + creds.getUserName());
+
+        } catch (Exception e) {
+            logger.error("Error retrieving CyberArk credentials: " + e.getMessage(), e);
+        }
+
+        return creds;
+    }
+
+    private String getPasswordFromCreds(PSDKPassword creds) {
+        if (creds == null) {
+            return null;
+        }
+
+        char[] passwordChars = creds.getSecureContent();
+        String password = new String(passwordChars);
+        Arrays.fill(passwordChars, '\0'); // Clear sensitive data
+
+        return password;
+    }
+}
