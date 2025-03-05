@@ -1,0 +1,362 @@
+<dependencies>
+    <!-- Spring Boot Web (For REST API Calls) -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- Spring Boot JPA (For Database Operations) -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <!-- Spring Boot Scheduler -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter</artifactId>
+    </dependency>
+
+    <!-- SQL Server Driver -->
+    <dependency>
+        <groupId>com.microsoft.sqlserver</groupId>
+        <artifactId>mssql-jdbc</artifactId>
+        <scope>runtime</scope>
+    </dependency>
+
+    <!-- Lombok (For Reducing Boilerplate Code) -->
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <scope>provided</scope>
+    </dependency>
+    
+    <!-- Spring Boot Test -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-test</artifactId>
+        <scope>test</scope>
+    </dependency>
+</dependencies>
+
+
+
+
+------------------------------------
+
+# Database Configuration
+spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=CyberArkDB
+spring.datasource.username=sa
+spring.datasource.password=your_password
+spring.datasource.driver-class-name=com.microsoft.sqlserver.jdbc.SQLServerDriver
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+
+# CyberArk CCP URL
+cyberark.ccp.url=https://your-cyberark-url.com
+
+# Scheduler Configuration (Runs Daily at 2 AM)
+spring.task.scheduling.pool.size=5
+
+
+-----------------------------------------------------
+
+package com.cyberark.entity;
+
+import jakarta.persistence.*;
+import lombok.Data;
+import java.time.LocalDate;
+
+@Entity
+@Data
+public class Credential {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    private String safeId;
+    private String appId;
+    private String objectName;
+    private LocalDate lastModifiedDate;
+    private LocalDate expiryDate;
+}
+
+
+
+------------------------
+
+
+
+
+package com.cyberark.repository;
+
+import com.cyberark.entity.Credential;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface CredentialRepository extends JpaRepository<Credential, Long> {
+    Optional<Credential> findBySafeIdAndAppIdAndObjectName(String safeId, String appId, String objectName);
+}
+
+
+--------------------------------------------
+
+
+package com.cyberark.dto;
+
+import lombok.Data;
+
+@Data
+public class CyberArkResponse {
+    private String lastModifiedDate;
+}
+
+
+
+--------------------------------------------
+
+
+package com.cyberark.service;
+
+import com.cyberark.dto.CyberArkResponse;
+import com.cyberark.entity.Credential;
+import com.cyberark.repository.CredentialRepository;
+import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.Optional;
+
+@Service
+@RequiredArgsConstructor
+public class CyberArkService {
+
+    private static final Logger logger = LoggerFactory.getLogger(CyberArkService.class);
+
+    private final RestTemplate restTemplate;
+    private final CredentialRepository credentialRepository;
+
+    @Value("${cyberark.ccp.url}")
+    private String ccpUrl;
+
+    @Scheduled(cron = "0 0 2 * * ?") // Runs daily at 2 AM
+    public void fetchAndStoreCredentials() {
+        logger.info("Scheduled Task: Checking CyberArk credentials...");
+
+        // List of applications (This should ideally come from DB)
+        String[][] applications = {
+                {"App1", "Safe1", "Object1"},
+                {"App2", "Safe2", "Object2"}
+        };
+
+        for (String[] app : applications) {
+            String appId = app[0];
+            String safeId = app[1];
+            String objectName = app[2];
+
+            String url = String.format("%s/AIMWebService/api/Accounts?AppID=%s&Safe=%s&Object=%s",
+                    ccpUrl, appId, safeId, objectName);
+
+            logger.info("Fetching data from: {}", url);
+
+            CyberArkResponse response = restTemplate.getForObject(url, CyberArkResponse.class);
+
+            if (response != null && response.getLastModifiedDate() != null) {
+                LocalDate lastModifiedDate = LocalDate.parse(response.getLastModifiedDate(), DateTimeFormatter.ISO_DATE_TIME);
+                LocalDate expiryDate = lastModifiedDate.plusDays(90);
+
+                Optional<Credential> existingCredential = credentialRepository.findBySafeIdAndAppIdAndObjectName(safeId, appId, objectName);
+
+                if (existingCredential.isPresent()) {
+                    Credential credential = existingCredential.get();
+                    if (!credential.getLastModifiedDate().equals(lastModifiedDate)) {
+                        credential.setLastModifiedDate(lastModifiedDate);
+                        credential.setExpiryDate(expiryDate);
+                        credentialRepository.save(credential);
+                        logger.info("Updated credential for Safe: {}, App: {}, Object: {}", safeId, appId, objectName);
+                    }
+                } else {
+                    Credential newCredential = new Credential();
+                    newCredential.setSafeId(safeId);
+                    newCredential.setAppId(appId);
+                    newCredential.setObjectName(objectName);
+                    newCredential.setLastModifiedDate(lastModifiedDate);
+                    newCredential.setExpiryDate(expiryDate);
+                    credentialRepository.save(newCredential);
+                    logger.info("Inserted new credential for Safe: {}, App: {}, Object: {}", safeId, appId, objectName);
+                }
+            } else {
+                logger.warn("No valid response for Safe: {}, App: {}, Object: {}", safeId, appId, objectName);
+            }
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------------------------------------
+
+
+package com.cyberark.service;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+class CyberArkServiceTest {
+
+    @Test
+    void testExpiryDateCalculation() {
+        LocalDate lastModifiedDate = LocalDate.of(2025, 3, 1);
+        LocalDate expectedExpiryDate = lastModifiedDate.plusDays(90);
+        assertEquals(expectedExpiryDate, lastModifiedDate.plusDays(90));
+    }
+}
+
+
+--------------------------------------------------------
+
+
+package com.cyberark.entity;
+
+import jakarta.persistence.*;
+import lombok.Data;
+
+@Entity
+@Data
+public class ApplicationDetail {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    private String appId;
+    private String safeId;
+    private String objectName;
+}
+
+
+--------------------------------------------------------
+
+
+
+package com.cyberark.repository;
+
+import com.cyberark.entity.ApplicationDetail;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface ApplicationDetailRepository extends JpaRepository<ApplicationDetail, Long> {
+}
+
+
+
+--------------------------------------------------------------------------------------------
+
+
+package com.cyberark.service;
+
+import com.cyberark.dto.CyberArkResponse;
+import com.cyberark.entity.ApplicationDetail;
+import com.cyberark.entity.Credential;
+import com.cyberark.repository.ApplicationDetailRepository;
+import com.cyberark.repository.CredentialRepository;
+import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.Optional;
+
+@Service
+@RequiredArgsConstructor
+public class CyberArkService {
+
+    private static final Logger logger = LoggerFactory.getLogger(CyberArkService.class);
+
+    private final RestTemplate restTemplate;
+    private final CredentialRepository credentialRepository;
+    private final ApplicationDetailRepository applicationDetailRepository;
+
+    @Value("${cyberark.ccp.url}")
+    private String ccpUrl;
+
+    @Scheduled(cron = "0 0 2 * * ?") // Runs daily at 2 AM
+    public void fetchAndStoreCredentials() {
+        logger.info("Scheduled Task: Checking CyberArk credentials...");
+
+        // Fetch application details from the database
+        List<ApplicationDetail> applications = applicationDetailRepository.findAll();
+
+        for (ApplicationDetail app : applications) {
+            String appId = app.getAppId();
+            String safeId = app.getSafeId();
+            String objectName = app.getObjectName();
+
+            String url = String.format("%s/AIMWebService/api/Accounts?AppID=%s&Safe=%s&Object=%s",
+                    ccpUrl, appId, safeId, objectName);
+
+            logger.info("Fetching data from: {}", url);
+
+            CyberArkResponse response = restTemplate.getForObject(url, CyberArkResponse.class);
+
+            if (response != null && response.getLastModifiedDate() != null) {
+                LocalDate lastModifiedDate = LocalDate.parse(response.getLastModifiedDate(), DateTimeFormatter.ISO_DATE_TIME);
+                LocalDate expiryDate = lastModifiedDate.plusDays(90);
+
+                Optional<Credential> existingCredential = credentialRepository.findBySafeIdAndAppIdAndObjectName(safeId, appId, objectName);
+
+                if (existingCredential.isPresent()) {
+                    Credential credential = existingCredential.get();
+                    if (!credential.getLastModifiedDate().equals(lastModifiedDate)) {
+                        credential.setLastModifiedDate(lastModifiedDate);
+                        credential.setExpiryDate(expiryDate);
+                        credentialRepository.save(credential);
+                        logger.info("Updated credential for Safe: {}, App: {}, Object: {}", safeId, appId, objectName);
+                    }
+                } else {
+                    Credential newCredential = new Credential();
+                    newCredential.setSafeId(safeId);
+                    newCredential.setAppId(appId);
+                    newCredential.setObjectName(objectName);
+                    newCredential.setLastModifiedDate(lastModifiedDate);
+                    newCredential.setExpiryDate(expiryDate);
+                    credentialRepository.save(newCredential);
+                    logger.info("Inserted new credential for Safe: {}, App: {}, Object: {}", safeId, appId, objectName);
+                }
+            } else {
+                logger.warn("No valid response for Safe: {}, App: {}, Object: {}", safeId, appId, objectName);
+            }
+        }
+    }
+}
+
+
+
+-------------------------------------------------------------------------------------------
+
+
+INSERT INTO application_detail (app_id, safe_id, object_name) VALUES ('App1', 'Safe1', 'Object1');
+INSERT INTO application_detail (app_id, safe_id, object_name) VALUES ('App2', 'Safe2', 'Object2');
+
+
+
+
+
+CREATE TABLE applications (
+    id INT IDENTITY PRIMARY KEY,
+    app_id VARCHAR(255) NOT NULL,
+    safe_id VARCHAR(255) NOT NULL,
+    object_name VARCHAR(255) NOT NULL
+);
